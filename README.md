@@ -18,5 +18,7 @@ dropoff_ts
 pickup_location_id
 
 dropoff_location_id
+
 passenger_count
+
 trip_distance
