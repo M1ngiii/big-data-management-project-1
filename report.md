@@ -99,36 +99,32 @@ Rule applied: `dropoff_ts > pickup_ts` — same as above; instantaneous trips ar
 
 ---
 
-### 2c. Optimization Choices
+## 2c. Optimization Choices
 
-**Optimization 1 — Broadcast join for zone lookup**
+### Optimization 1 — Reducing shuffle partitions
 
-The taxi zone lookup table (~265 rows) is small enough to fit in memory on every executor. Rather than a standard shuffle join (which would require redistributing both the trip data and the lookup table across the network), we explicitly wrap the lookup DataFrame in `F.broadcast()`:
+By default, Spark uses 200 shuffle partitions for wide transformations such as joins and aggregations. With a dataset of ~6.7 million rows on a local or small cluster, 200 partitions creates significant scheduling and task-launch overhead: most tasks finish in milliseconds and spend a disproportionate amount of time in driver and executor coordination. We reduced this to 16:
 
 ```python
-df = df.join(F.broadcast(pu), on="pickup_location_id", how="left")
-df = df.join(F.broadcast(do), on="dropoff_location_id", how="left")
+# Reduce number of partitions, lesser overhead
+spark.conf.set("spark.sql.shuffle.partitions", "16")
 ```
 
-This eliminates shuffle for both the pickup and dropoff zone joins. In the Spark UI, the corresponding stages show near-zero shuffle read/write, compared to a standard join which would produce shuffle traffic proportional to the full 7M-row dataset.
-
-**Observed change:** _TODO — e.g., "Stage 4 shuffle write dropped from X MB to 0 MB; stage duration dropped from Xs to Ys."_
+**What changed:** With 200 partitions, the shuffle stage for the zone enrichment join produced a long tail of near-empty tasks visible in the Spark UI stage timeline. Dropping to 16 consolidated that work into fewer, fuller tasks. The stage that previously showed hundreds of sub-10 ms tasks instead completed with a small number of tasks each processing a meaningful data slice, and per-stage scheduling overhead fell noticeably as a result.
 
 ---
 
-**Optimization 2 — Caching the cleaned DataFrame**
+### Optimization 2 — Enabling Adaptive Query Execution (AQE)
 
-After `transform_minimum()`, the cleaned DataFrame is cached with `.cache()` before the row count action:
+Spark's AQE framework allows the engine to re-optimise the physical plan at runtime, after it has seen actual shuffle statistics rather than relying purely on estimated row counts. We enabled AQE together with its partition coalescing feature:
 
 ```python
-new_clean_df = transform_minimum(new_raw_df).cache()
-after_clean_rows = new_clean_df.count()
+# Ensure AQE is enabled
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 ```
 
-Without caching, Spark would recompute the full cleaning pipeline (including the source parquet reads) twice: once for the `count()` and again for the downstream enrichment and join. Caching materialises the cleaned data in memory after the first pass, so subsequent operations reuse it without re-scanning or re-cleaning the raw files.
-
-**Observed change:** _TODO — e.g., "Second pass over cleaned data served from cache in Xs vs Ys for a full recompute; visible in UI as a cached RDD reuse on stage X."_
-
+**What changed:** AQE's `coalescePartitions` feature automatically merges small post-shuffle partitions into larger ones based on actual data sizes observed at runtime. This complements the static partition reduction above: rather than guessing the right count upfront, AQE adjusts dynamically per stage. In practice, stages following a shuffle showed fewer, better-balanced tasks in the Spark UI compared to runs without AQE, and the join and aggregation phases completed with consistently shorter stage durations.
 ---
 
 ## 3. Scenario — `fare_per_mile` Quality Report
