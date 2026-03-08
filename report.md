@@ -125,6 +125,8 @@ spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 ```
 
 **What changed:** AQE's `coalescePartitions` feature automatically merges small post-shuffle partitions into larger ones based on actual data sizes observed at runtime. This complements the static partition reduction above: rather than guessing the right count upfront, AQE adjusts dynamically per stage. In practice, stages following a shuffle showed fewer, better-balanced tasks in the Spark UI compared to runs without AQE, and the join and aggregation phases completed with consistently shorter stage durations.
+
+All optimization related run info under "screenshots"
 ---
 
 ## 3. Scenario — `fare_per_mile` Quality Report
